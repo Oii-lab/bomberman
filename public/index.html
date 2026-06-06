@@ -8,7 +8,6 @@
 </head>
 <body>
 
-<!-- ── LOBBY ── -->
 <div id="lobby">
   <div class="lobby-bg"></div>
   <div class="lobby-card">
@@ -34,7 +33,6 @@
   </div>
 </div>
 
-<!-- ── WAITING ── -->
 <div id="waiting" class="hidden">
   <div class="waiting-card">
     <div class="spinner"></div>
@@ -44,32 +42,36 @@
   </div>
 </div>
 
-<!-- ── GAME ── -->
 <div id="game" class="hidden">
   <div id="hud">
     <div class="hud-player" id="hud0">
       <span class="hud-icon">🔴</span>
-      <span class="hud-name" id="hud0name">P1</span>
+      <div class="hud-info">
+        <span class="hud-name" id="hud0name">P1</span>
+        <span class="hud-stats" id="hud0stats"></span>
+      </div>
       <span class="hud-status" id="hud0status">❤️</span>
     </div>
     <div class="hud-center">
+      <span id="themeLabel"></span><br>
       <span id="gameStatus">進行中</span>
     </div>
     <div class="hud-player" id="hud1">
       <span class="hud-status" id="hud1status">❤️</span>
-      <span class="hud-name" id="hud1name">P2</span>
+      <div class="hud-info" style="text-align:right">
+        <span class="hud-name" id="hud1name">P2</span>
+        <span class="hud-stats" id="hud1stats"></span>
+      </div>
       <span class="hud-icon">🔵</span>
     </div>
   </div>
-  <div id="canvasWrap">
-    <canvas id="gameCanvas"></canvas>
-  </div>
+  <div id="canvasWrap"><canvas id="gameCanvas"></canvas></div>
   <div id="controls-hint">
     <span id="myControls"></span>
+    <span class="hint-items">道具：💣炸彈數 🔥射程 ⚡速度 👻穿牆彈 📡遙控彈</span>
   </div>
 </div>
 
-<!-- ── GAME OVER OVERLAY ── -->
 <div id="overlay" class="hidden">
   <div class="overlay-card">
     <div id="overlayIcon">💥</div>
@@ -79,7 +81,6 @@
   </div>
 </div>
 
-<!-- ── DISCONNECTED ── -->
 <div id="disconnected" class="hidden">
   <div class="overlay-card">
     <div>🔌</div>
