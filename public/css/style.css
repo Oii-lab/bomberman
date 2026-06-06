@@ -284,3 +284,8 @@ body {
 }
 .overlay-card p { color: var(--muted); margin-bottom: 28px; font-size: .9rem; }
 .overlay-card .btn-join { margin-top: 0; }
+
+/* ── HUD stats ── */
+.hud-info { display:flex; flex-direction:column; }
+.hud-stats { font-size:.6rem; color:#aaa; min-height:14px; }
+.hint-items { margin-left:16px; font-size:.72rem; color:#555; }
