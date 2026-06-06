@@ -197,6 +197,16 @@ function drawItem(x,y,type,C){
   ctx.restore();
 }
 
+function fillRoundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);
+  ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
+  ctx.lineTo(x+r,y+h); ctx.arcTo(x,y+h,x,y+h-r,r);
+  ctx.lineTo(x,y+r); ctx.arcTo(x,y,x+r,y,r);
+  ctx.closePath(); ctx.fill();
+}
+
 function drawPlayer(p,C){
   const px=p.x*C, py=p.y*C;
   const color=p.index===0?'#ff3c3c':'#3c8bff';
@@ -206,9 +216,9 @@ function drawPlayer(p,C){
   ctx.save();
   if(isMe){ctx.shadowColor=color;ctx.shadowBlur=14;}
   ctx.fillStyle=dark;
-  ctx.beginPath(); ctx.roundRect(px+6,py+C/2-2,C-12,C/2-4,4); ctx.fill();
+  fillRoundRect(px+6,py+C/2-2,C-12,C/2-4,4);
   ctx.fillStyle=color;
-  ctx.beginPath(); ctx.roundRect(px+7,py+C/2-1,C-14,C/2-6,3); ctx.fill();
+  fillRoundRect(px+7,py+C/2-1,C-14,C/2-6,3);
   ctx.fillStyle=color;
   ctx.beginPath(); ctx.arc(cx,py+C/2-4,C/2-8,0,Math.PI*2); ctx.fill();
   ctx.fillStyle='#fff';
@@ -244,8 +254,8 @@ function updateHud(s){
     const statsEl=$(`hud${p.index}stats`);
     if(statsEl){
       let icons='';
-      icons+=`💣×${p.maxBombs} `;
-      icons+=`🔥×${p.bombRange} `;
+      icons+=`💣×${p.maxBombs??1} `;
+      icons+=`🔥×${p.bombRange??2} `;
       if(p.speed<105) icons+='⚡ ';
       if(p.pierce) icons+='👻 ';
       if(p.remote) icons+='📡 ';
