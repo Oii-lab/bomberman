@@ -8,315 +8,416 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 app.use(express.static(path.join(__dirname, '../public')));
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-const COLS = 15, ROWS = 13;
-const TILE = { EMPTY: 0, WALL: 1, BLOCK: 2, BOMB: 3, FIRE: 4 };
-const BOMB_TIMER = 3000;
-const FIRE_DURATION = 700;
-const MOVE_COOLDOWN = 105;
-const SPAWNS = [{ x:1,y:1 }, { x:COLS-2,y:ROWS-2 }];
-
-// Item types
-const ITEM = { BOMB_UP:1, RANGE_UP:2, SPEED_UP:3, PIERCE:4, REMOTE:5 };
-const ITEM_CHANCE = 0.35; // chance block drops item
-
-// Map themes
+// ─── 常數 ──────────────────────────────────────────────────────────────────────
+const COLS = 15;
+const ROWS = 13;
+const TILE  = { EMPTY:0, WALL:1, BLOCK:2, FIRE:3 };
+const ITEM  = { BOMB_UP:1, RANGE_UP:2, SPEED_UP:3, PIERCE:4, REMOTE:5 };
 const THEMES = ['dungeon','forest','space','lava'];
 
-// ─── Map generation ───────────────────────────────────────────────────────────
+const BOMB_FUSE     = 3000;  // 炸彈引爆時間 ms
+const FIRE_DURATION = 700;   // 火焰持續 ms
+const BASE_SPEED    = 120;   // 移動 cooldown ms（越小越快）
+const MIN_SPEED     = 65;
+const SPEED_STEP    = 18;
+const ITEM_DROP     = 0.38;  // 磚塊掉道具機率
+
+const SPAWNS = [
+  { x:1,       y:1       },
+  { x:COLS-2,  y:ROWS-2  },
+];
+
+// ─── 地圖生成 ──────────────────────────────────────────────────────────────────
 function generateMap(theme) {
-  const map = [];
-  for (let y = 0; y < ROWS; y++) {
-    map[y] = [];
-    for (let x = 0; x < COLS; x++) {
-      if (y===0||y===ROWS-1||x===0||x===COLS-1) map[y][x] = TILE.WALL;
-      else if (y%2===0 && x%2===0) map[y][x] = TILE.WALL;
-      else map[y][x] = TILE.EMPTY;
-    }
-  }
-  // lava theme: extra random walls inside
+  const map = Array.from({ length: ROWS }, (_, y) =>
+    Array.from({ length: COLS }, (_, x) => {
+      if (y===0 || y===ROWS-1 || x===0 || x===COLS-1) return TILE.WALL;
+      if (y%2===0 && x%2===0) return TILE.WALL;
+      return TILE.EMPTY;
+    })
+  );
+
+  // lava 主題：多一些隨機牆壁
   if (theme === 'lava') {
-    for (let y=1;y<ROWS-1;y++) for (let x=1;x<COLS-1;x++) {
-      if (map[y][x]===TILE.EMPTY && Math.random()<0.05) map[y][x]=TILE.WALL;
-    }
+    for (let y=1; y<ROWS-1; y++)
+      for (let x=1; x<COLS-1; x++)
+        if (map[y][x]===TILE.EMPTY && Math.random()<0.04) map[y][x]=TILE.WALL;
   }
-  const spawnSafe = new Set();
+
+  // 出生點保護範圍
+  const safe = new Set();
   SPAWNS.forEach(s => {
-    for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++)
-      spawnSafe.add(`${s.x+dx},${s.y+dy}`);
+    for (let dy=-1; dy<=1; dy++)
+      for (let dx=-1; dx<=1; dx++)
+        safe.add(`${s.x+dx},${s.y+dy}`);
   });
-  for (let y=1;y<ROWS-1;y++) for (let x=1;x<COLS-1;x++) {
-    if (map[y][x]===TILE.EMPTY && !spawnSafe.has(`${x},${y}`) && Math.random()<0.42)
-      map[y][x] = TILE.BLOCK;
-  }
+
+  // 填入可破壞磚塊
+  for (let y=1; y<ROWS-1; y++)
+    for (let x=1; x<COLS-1; x++)
+      if (map[y][x]===TILE.EMPTY && !safe.has(`${x},${y}`) && Math.random()<0.42)
+        map[y][x] = TILE.BLOCK;
+
   return map;
 }
 
-// ─── Rooms ────────────────────────────────────────────────────────────────────
+// ─── 房間管理 ──────────────────────────────────────────────────────────────────
 const rooms = {};
 
 function createRoom(roomId) {
-  const theme = THEMES[Math.floor(Math.random()*THEMES.length)];
+  const theme = THEMES[Math.floor(Math.random() * THEMES.length)];
   return {
-    id: roomId, theme,
+    id: roomId,
+    theme,
     map: generateMap(theme),
-    players: {},
-    bombs: [],
-    fires: [],
-    items: [],       // { x, y, type }
-    started: false, over: false, winner: null,
+    players: {},   // socketId -> player
+    bombs: [],     // { id, x, y, ownerId, range, pierce, remote, timerId }
+    fires: [],     // { x, y }
+    items: [],     // { x, y, type }
+    started: false,
+    over: false,
+    winner: null,
     timers: [],
   };
 }
 
-function broadcastRoom(room) {
+function broadcast(room) {
   io.to(room.id).emit('state', {
-    map: room.map, players: room.players,
-    bombs: room.bombs, fires: room.fires, items: room.items,
-    started: room.started, over: room.over, winner: room.winner,
-    theme: room.theme,
+    map:     room.map,
+    players: room.players,
+    bombs:   room.bombs.map(b => ({ id:b.id, x:b.x, y:b.y, pierce:b.pierce, remote:b.remote, ownerId:b.ownerId })),
+    fires:   room.fires,
+    items:   room.items,
+    started: room.started,
+    over:    room.over,
+    winner:  room.winner,
+    theme:   room.theme,
   });
 }
 
-// ─── Items ────────────────────────────────────────────────────────────────────
-function spawnItem(room, x, y) {
-  if (Math.random() > ITEM_CHANCE) return;
-  const types = [ITEM.BOMB_UP, ITEM.RANGE_UP, ITEM.SPEED_UP, ITEM.PIERCE, ITEM.REMOTE];
-  // weight: common items more likely
-  const weights = [30, 30, 25, 8, 7];
-  const total = weights.reduce((a,b)=>a+b,0);
-  let r = Math.random()*total;
-  let type = types[0];
-  for (let i=0;i<types.length;i++) { r-=weights[i]; if (r<=0){type=types[i];break;} }
-  room.items.push({ x, y, type });
+// ─── 道具 ──────────────────────────────────────────────────────────────────────
+function tryDropItem(room, x, y) {
+  if (Math.random() > ITEM_DROP) return;
+  // 加權隨機
+  const pool = [
+    { type:ITEM.BOMB_UP,  w:28 },
+    { type:ITEM.RANGE_UP, w:28 },
+    { type:ITEM.SPEED_UP, w:24 },
+    { type:ITEM.PIERCE,   w:10 },
+    { type:ITEM.REMOTE,   w:10 },
+  ];
+  const total = pool.reduce((s,i) => s+i.w, 0);
+  let r = Math.random() * total;
+  const chosen = pool.find(i => { r -= i.w; return r <= 0; }) || pool[0];
+  room.items.push({ x, y, type: chosen.type });
 }
 
-function pickupItems(room, player) {
-  for (let i = room.items.length-1; i>=0; i--) {
+function collectItems(room, player) {
+  for (let i = room.items.length - 1; i >= 0; i--) {
     const item = room.items[i];
-    if (item.x===player.x && item.y===player.y) {
-      applyItem(player, item.type);
-      room.items.splice(i, 1);
+    if (item.x !== player.x || item.y !== player.y) continue;
+    room.items.splice(i, 1);
+    switch (item.type) {
+      case ITEM.BOMB_UP:  player.maxBombs  = Math.min(player.maxBombs + 1, 5); break;
+      case ITEM.RANGE_UP: player.bombRange = Math.min(player.bombRange + 1, 7); break;
+      case ITEM.SPEED_UP: player.speed     = Math.max(player.speed - SPEED_STEP, MIN_SPEED); break;
+      case ITEM.PIERCE:   player.pierce    = true; break;
+      case ITEM.REMOTE:   player.remote    = true; break;
     }
   }
 }
 
-function applyItem(player, type) {
-  switch(type) {
-    case ITEM.BOMB_UP:   player.maxBombs = Math.min(player.maxBombs+1, 5); break;
-    case ITEM.RANGE_UP:  player.bombRange = Math.min(player.bombRange+1, 7); break;
-    case ITEM.SPEED_UP:  player.speed = Math.max(player.speed-15, 60); break;
-    case ITEM.PIERCE:    player.pierce = true; break;
-    case ITEM.REMOTE:    player.remote = true; break;
-  }
-}
+// ─── 炸彈 ──────────────────────────────────────────────────────────────────────
+let _bombId = 0;
 
-// ─── Bomb ─────────────────────────────────────────────────────────────────────
 function placeBomb(room, player) {
-  if (player.bombsPlaced >= player.maxBombs) return;
-  if (room.bombs.find(b=>b.x===player.x&&b.y===player.y)) return;
+  if (!player.alive || room.over) return;
 
-  player.bombsPlaced++;
+  const activeBombs = room.bombs.filter(b => b.ownerId === player.id);
+  if (activeBombs.length >= player.maxBombs) return;
+
+  // 同格已有炸彈
+  if (room.bombs.some(b => b.x === player.x && b.y === player.y)) return;
+
   const bomb = {
-    x: player.x, y: player.y, owner: player.id,
-    range: player.bombRange,
-    pierce: player.pierce,
-    remote: player.remote,
-    id: Date.now() + Math.random(),
+    id:      ++_bombId,
+    x:       player.x,
+    y:       player.y,
+    ownerId: player.id,
+    range:   player.bombRange,
+    pierce:  player.pierce,
+    remote:  player.remote,
+    timerId: null,
   };
   room.bombs.push(bomb);
-  room.map[bomb.y][bomb.x] = TILE.BOMB;
 
+  // 遙控炸彈不自動爆炸
   if (!bomb.remote) {
-    const t = setTimeout(() => explodeBomb(room, bomb), BOMB_TIMER);
-    bomb._timer = t;
-    room.timers.push(t);
+    bomb.timerId = setTimeout(() => triggerBomb(room, bomb.id), BOMB_FUSE);
+    room.timers.push(bomb.timerId);
   }
-  broadcastRoom(room);
+
+  broadcast(room);
 }
 
-function detonateRemote(room, player) {
-  const myBombs = room.bombs.filter(b=>b.owner===player.id && b.remote);
-  if (myBombs.length===0) return;
-  // detonate oldest
-  explodeBomb(room, myBombs[0]);
+function detonateRemoteBombs(room, player) {
+  // 引爆該玩家最舊的遙控炸彈
+  const remoteBombs = room.bombs.filter(b => b.ownerId === player.id && b.remote);
+  if (remoteBombs.length === 0) return false;
+  triggerBomb(room, remoteBombs[0].id);
+  return true;
 }
 
-function explodeBomb(room, bomb) {
-  const idx = room.bombs.indexOf(bomb);
-  if (idx===-1) return;
-  if (bomb._timer) { clearTimeout(bomb._timer); }
-  room.bombs.splice(idx, 1);
-  if (room.map[bomb.y]?.[bomb.x] === TILE.BOMB) room.map[bomb.y][bomb.x] = TILE.EMPTY;
+function triggerBomb(room, bombId) {
+  const bomb = room.bombs.find(b => b.id === bombId);
+  if (!bomb) return; // 已被連鎖引爆
 
-  const owner = Object.values(room.players).find(p=>p.id===bomb.owner);
-  if (owner) owner.bombsPlaced = Math.max(0, owner.bombsPlaced-1);
+  // 清除計時器
+  if (bomb.timerId) {
+    clearTimeout(bomb.timerId);
+    const ti = room.timers.indexOf(bomb.timerId);
+    if (ti !== -1) room.timers.splice(ti, 1);
+  }
 
-  const cells = getExplosionCells(room, bomb);
-  cells.forEach(({x,y}) => {
-    room.map[y][x] = TILE.FIRE;
-    // remove items under fire
-    const ii = room.items.findIndex(it=>it.x===x&&it.y===y);
-    if (ii!==-1) room.items.splice(ii,1);
-    room.fires.push({x,y});
-    // chain
-    const chain = room.bombs.find(b=>b.x===x&&b.y===y);
-    if (chain) explodeBomb(room, chain);
+  // 從炸彈列表移除
+  const bi = room.bombs.indexOf(bomb);
+  if (bi !== -1) room.bombs.splice(bi, 1);
+
+  // 計算爆炸格
+  const cells = calcExplosion(room, bomb);
+
+  // 處理每格
+  cells.forEach(({ x, y }) => {
+    // 移除該格道具
+    const ii = room.items.findIndex(it => it.x===x && it.y===y);
+    if (ii !== -1) room.items.splice(ii, 1);
+
+    // 標記火焰
+    room.fires.push({ x, y });
+
+    // 連鎖引爆
+    const chainBomb = room.bombs.find(b => b.x===x && b.y===y);
+    if (chainBomb) triggerBomb(room, chainBomb.id);
   });
 
-  // kill players
+  // 判定玩家死亡（在火焰格）
   Object.values(room.players).forEach(p => {
     if (!p.alive) return;
-    if (cells.find(c=>c.x===p.x&&c.y===p.y)) p.alive = false;
+    if (cells.some(c => c.x===p.x && c.y===p.y)) {
+      p.alive = false;
+    }
   });
 
   checkWin(room);
-  broadcastRoom(room);
+  broadcast(room);
 
+  // 火焰消退
   const ft = setTimeout(() => {
-    cells.forEach(({x,y}) => {
-      if (room.map[y]?.[x]===TILE.FIRE) room.map[y][x]=TILE.EMPTY;
-      const fi = room.fires.findIndex(f=>f.x===x&&f.y===y);
-      if (fi!==-1) room.fires.splice(fi,1);
+    cells.forEach(({ x, y }) => {
+      const fi = room.fires.findIndex(f => f.x===x && f.y===y);
+      if (fi !== -1) room.fires.splice(fi, 1);
     });
-    broadcastRoom(room);
+    broadcast(room);
   }, FIRE_DURATION);
   room.timers.push(ft);
 }
 
-function getExplosionCells(room, bomb) {
-  const cells = [{x:bomb.x,y:bomb.y}];
-  const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
-  dirs.forEach(([dx,dy]) => {
-    for (let i=1;i<=bomb.range;i++) {
-      const nx=bomb.x+dx*i, ny=bomb.y+dy*i;
-      if (nx<0||ny<0||nx>=COLS||ny>=ROWS) break;
+function calcExplosion(room, bomb) {
+  const cells = [{ x: bomb.x, y: bomb.y }];
+  const dirs  = [[1,0],[-1,0],[0,1],[0,-1]];
+
+  dirs.forEach(([dx, dy]) => {
+    for (let i = 1; i <= bomb.range; i++) {
+      const nx = bomb.x + dx*i;
+      const ny = bomb.y + dy*i;
+      if (nx<0 || ny<0 || nx>=COLS || ny>=ROWS) break;
+
       const tile = room.map[ny][nx];
-      if (tile===TILE.WALL) break;
-      if (tile===TILE.BLOCK || tile===TILE.BOMB) {
-        cells.push({x:nx,y:ny});
-        if (tile===TILE.BLOCK) {
-          room.map[ny][nx]=TILE.EMPTY;
-          spawnItem(room, nx, ny);
-        }
-        if (!bomb.pierce) break;
-        // pierce continues but doesn't push duplicate
-      } else {
-        cells.push({x:nx,y:ny});
+
+      if (tile === TILE.WALL) break; // 永久牆壁：停止
+
+      if (tile === TILE.BLOCK) {
+        cells.push({ x:nx, y:ny });
+        room.map[ny][nx] = TILE.EMPTY;
+        tryDropItem(room, nx, ny);
+        if (!bomb.pierce) break; // 非穿牆：停止；穿牆：繼續
+        continue;
       }
+
+      // EMPTY or FIRE
+      cells.push({ x:nx, y:ny });
     }
   });
+
   return cells;
 }
 
+// ─── 勝負判定 ──────────────────────────────────────────────────────────────────
 function checkWin(room) {
   if (room.over) return;
-  const alive = Object.values(room.players).filter(p=>p.alive);
-  if (alive.length<=1) {
-    room.over = true;
-    room.winner = alive.length===1 ? alive[0].name : 'Draw';
-    room.timers.forEach(t=>clearTimeout(t));
-    room.timers=[];
-  }
+  const alive = Object.values(room.players).filter(p => p.alive);
+  if (alive.length > 1) return;
+  room.over   = true;
+  room.winner = alive.length === 1 ? alive[0].name : 'Draw';
+  room.timers.forEach(t => clearTimeout(t));
+  room.timers = [];
 }
 
-// ─── Movement ─────────────────────────────────────────────────────────────────
+// ─── 移動 ──────────────────────────────────────────────────────────────────────
+const DIR_DELTA = { up:[0,-1], down:[0,1], left:[-1,0], right:[1,0] };
+
 function movePlayer(room, player, dir) {
-  if (!player.alive||room.over) return;
+  if (!player.alive || room.over) return;
+
   const now = Date.now();
-  if (now-player.lastMove < player.speed) return;
-  player.lastMove = now;
+  if (now - player.lastMove < player.speed) return;
 
-  const dx={left:-1,right:1,up:0,down:0}[dir]??0;
-  const dy={left:0,right:0,up:-1,down:1}[dir]??0;
-  const nx=player.x+dx, ny=player.y+dy;
-  if (nx<0||ny<0||nx>=COLS||ny>=ROWS) return;
+  const delta = DIR_DELTA[dir];
+  if (!delta) return;
+
+  const nx = player.x + delta[0];
+  const ny = player.y + delta[1];
+
+  // 邊界檢查
+  if (nx<0 || ny<0 || nx>=COLS || ny>=ROWS) return;
+
   const tile = room.map[ny][nx];
-  // FIX: allow walking through fire (don't block, just damage)
-  if (tile===TILE.WALL||tile===TILE.BLOCK||tile===TILE.BOMB) return;
 
-  player.x=nx; player.y=ny;
+  // 不可通行：永久牆、可破壞磚塊
+  if (tile === TILE.WALL || tile === TILE.BLOCK) return;
 
-  if (tile===TILE.FIRE) { player.alive=false; checkWin(room); }
-  else pickupItems(room, player);
+  // 炸彈格：不可通行（玩家不能踩炸彈，但放完炸彈後可以離開）
+  if (room.bombs.some(b => b.x===nx && b.y===ny)) return;
 
-  broadcastRoom(room);
+  player.lastMove = now;
+  player.x = nx;
+  player.y = ny;
+
+  // 踩到火焰：死亡
+  if (room.fires.some(f => f.x===nx && f.y===ny)) {
+    player.alive = false;
+    checkWin(room);
+  } else {
+    // 撿道具
+    collectItems(room, player);
+  }
+
+  broadcast(room);
 }
 
 // ─── Socket.io ────────────────────────────────────────────────────────────────
 io.on('connection', socket => {
-  socket.on('join', ({roomId, name}) => {
-    if (!roomId||!name) return;
-    if (!rooms[roomId]) rooms[roomId]=createRoom(roomId);
-    const room = rooms[roomId];
-    if (room.over) { socket.emit('error','遊戲已結束，請換個房間 ID'); return; }
-    if (Object.keys(room.players).length>=2) { socket.emit('error','房間已滿'); return; }
 
-    const idx = Object.keys(room.players).length;
+  socket.on('join', ({ roomId, name }) => {
+    if (!roomId || !name) return;
+    roomId = String(roomId).trim().slice(0, 30);
+    name   = String(name).trim().slice(0, 12);
+    if (!roomId || !name) return;
+
+    if (!rooms[roomId]) rooms[roomId] = createRoom(roomId);
+    const room = rooms[roomId];
+
+    if (room.over) {
+      socket.emit('joinError', '遊戲已結束，請換個房間 ID'); return;
+    }
+    if (Object.keys(room.players).length >= 2) {
+      socket.emit('joinError', '房間已滿'); return;
+    }
+
+    const idx   = Object.keys(room.players).length; // 0 or 1
     const spawn = SPAWNS[idx];
+
     room.players[socket.id] = {
-      id: socket.id, name: name.slice(0,12),
-      x: spawn.x, y: spawn.y,
-      alive: true, index: idx,
-      bombsPlaced: 0, maxBombs: 1,
-      bombRange: 2,
-      speed: MOVE_COOLDOWN,
-      pierce: false, remote: false,
+      id:       socket.id,
+      name,
+      index:    idx,
+      x:        spawn.x,
+      y:        spawn.y,
+      alive:    true,
+      maxBombs: 1,
+      bombRange:2,
+      speed:    BASE_SPEED,
+      pierce:   false,
+      remote:   false,
       lastMove: 0,
     };
+
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.emit('joined', { playerIndex: idx, playerId: socket.id });
-    if (Object.keys(room.players).length===2) { room.started=true; io.to(roomId).emit('start'); }
-    broadcastRoom(room);
+
+    if (Object.keys(room.players).length === 2) {
+      room.started = true;
+      io.to(roomId).emit('gameStart');
+    }
+
+    broadcast(room);
   });
 
   socket.on('move', dir => {
-    const room = rooms[socket.data.roomId]; if (!room) return;
-    const player = room.players[socket.id]; if (!player) return;
+    const room   = rooms[socket.data.roomId]; if (!room) return;
+    const player = room.players[socket.id];   if (!player) return;
     movePlayer(room, player, dir);
   });
 
   socket.on('bomb', () => {
-    const room = rooms[socket.data.roomId]; if (!room||!room.started||room.over) return;
-    const player = room.players[socket.id]; if (!player||!player.alive) return;
-    if (player.remote && room.bombs.find(b=>b.owner===socket.id&&b.remote)) {
-      detonateRemote(room, player);
-    } else {
-      placeBomb(room, player);
+    const room   = rooms[socket.data.roomId];
+    if (!room || !room.started || room.over) return;
+    const player = room.players[socket.id];
+    if (!player || !player.alive) return;
+
+    // 遙控模式：若已有遙控炸彈則引爆，否則放新的
+    if (player.remote) {
+      const placed = room.bombs.filter(b => b.ownerId === socket.id && b.remote);
+      if (placed.length > 0) {
+        detonateRemoteBombs(room, player);
+        return;
+      }
     }
+    placeBomb(room, player);
   });
 
   socket.on('restart', () => {
     const roomId = socket.data.roomId;
-    const room = rooms[roomId]; if (!room||!room.over) return;
+    const room   = rooms[roomId];
+    if (!room || !room.over) return;
+
+    const prevPlayers = Object.values(room.players);
+    room.timers.forEach(t => clearTimeout(t));
+
     const newRoom = createRoom(roomId);
-    Object.values(room.players).forEach((p,i) => {
-      const spawn=SPAWNS[i];
-      newRoom.players[p.id]={
-        id:p.id, name:p.name,
-        x:spawn.x, y:spawn.y,
-        alive:true, index:i,
-        bombsPlaced:0, maxBombs:1, bombRange:2,
-        speed:MOVE_COOLDOWN,
-        pierce:false, remote:false, lastMove:0,
+    prevPlayers.forEach((p, i) => {
+      const spawn = SPAWNS[i];
+      newRoom.players[p.id] = {
+        id: p.id, name: p.name, index: i,
+        x: spawn.x, y: spawn.y,
+        alive: true, maxBombs: 1, bombRange: 2,
+        speed: BASE_SPEED, pierce: false, remote: false,
+        lastMove: 0,
       };
     });
-    newRoom.started=true;
-    rooms[roomId]=newRoom;
-    io.to(roomId).emit('start');
-    broadcastRoom(newRoom);
+    newRoom.started = true;
+    rooms[roomId] = newRoom;
+
+    io.to(roomId).emit('gameStart');
+    broadcast(newRoom);
   });
 
   socket.on('disconnect', () => {
     const roomId = socket.data.roomId;
-    if (!roomId||!rooms[roomId]) return;
+    if (!roomId || !rooms[roomId]) return;
     const room = rooms[roomId];
-    const player = room.players[socket.id];
-    if (player) { io.to(roomId).emit('playerLeft',{name:player.name}); delete room.players[socket.id]; }
-    if (Object.keys(room.players).length===0) { room.timers.forEach(t=>clearTimeout(t)); delete rooms[roomId]; }
+    if (room.players[socket.id]) {
+      const name = room.players[socket.id].name;
+      delete room.players[socket.id];
+      io.to(roomId).emit('playerLeft', { name });
+    }
+    if (Object.keys(room.players).length === 0) {
+      room.timers.forEach(t => clearTimeout(t));
+      delete rooms[roomId];
+    }
   });
 });
 
-const PORT = process.env.PORT||3000;
-server.listen(PORT, ()=>console.log(`💣 Bomberman on http://localhost:${PORT}`));
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`💣 Bomberman running on http://localhost:${PORT}`));
